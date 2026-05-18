@@ -26,6 +26,7 @@ app.use('/api/food', require('./routes/food'));
 app.use('/api/ngo', require('./routes/ngo'));
 app.use('/api/volunteer', require('./routes/volunteer'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/geocode', require('./routes/geocode'));
 
 // Base Health check route (required by some hosts)
 app.get('/', (req, res) => {
