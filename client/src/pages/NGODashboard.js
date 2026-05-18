@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { foodAPI, ngoAPI } from '../utils/api';
+import { foodAPI, ngoAPI, routingAPI, geocodeAPI } from '../utils/api';
 import { useToast } from '../components/Toast';
 import DeliveryProgressBar from '../components/DeliveryProgressBar';
 import MapComponent from '../components/MapComponent';
@@ -21,6 +21,7 @@ const NGODashboard = () => {
 
   // Tracking modal state
   const [trackingModal, setTrackingModal] = useState({ isOpen: false, donation: null });
+  const [trackingMapData, setTrackingMapData] = useState({ markers: [], routeGeometry: null, routeInfo: null, loading: false });
 
   useEffect(() => {
     fetchData();
@@ -79,8 +80,66 @@ const NGODashboard = () => {
     }
   };
 
-  const handleTrackStatus = (donation) => {
+  const handleTrackStatus = async (donation) => {
     setTrackingModal({ isOpen: true, donation });
+    setTrackingMapData({ markers: [], routeGeometry: null, routeInfo: null, loading: true });
+
+    // Build markers from available data
+    const markers = [];
+    const pickupCoords = donation.pickupLocation?.coordinates;
+    if (pickupCoords?.lat && pickupCoords?.lng) {
+      markers.push({
+        lat: pickupCoords.lat,
+        lng: pickupCoords.lng,
+        popup: 'Pickup Location',
+        details: donation.pickupLocation.address,
+        type: 'pickup'
+      });
+    }
+
+    // Volunteer location from delivery record
+    const volunteerCoords = donation.delivery?.currentLocation;
+    if (volunteerCoords?.lat && volunteerCoords?.lng) {
+      markers.push({
+        lat: volunteerCoords.lat,
+        lng: volunteerCoords.lng,
+        popup: 'Volunteer',
+        details: donation.volunteerId?.name || 'Volunteer',
+        type: 'volunteer'
+      });
+    }
+
+    // Geocode delivery address
+    const deliveryAddress = donation.delivery?.deliveryAddress || donation.deliveryAddress;
+    if (deliveryAddress) {
+      try {
+        const geoRes = await geocodeAPI.search(deliveryAddress);
+        if (geoRes.data?.success && geoRes.data?.location) {
+          markers.push({
+            lat: geoRes.data.location.lat,
+            lng: geoRes.data.location.lng,
+            popup: 'Delivery Location',
+            details: deliveryAddress,
+            type: 'delivery'
+          });
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Try to get route
+    let routeGeometry = null;
+    let routeInfo = null;
+    if (volunteerCoords?.lat) {
+      try {
+        const routeRes = await routingAPI.getRoute(donation._id);
+        if (routeRes.data?.success) {
+          routeGeometry = routeRes.data.route?.geometry;
+          routeInfo = routeRes.data.route;
+        }
+      } catch { /* route not available yet */ }
+    }
+
+    setTrackingMapData({ markers, routeGeometry, routeInfo, loading: false });
   };
 
   return (
@@ -110,7 +169,7 @@ const NGODashboard = () => {
                 <div key={donation._id} className="card pending-card">
                   <div className="card-header">
                     <h3>{donation.foodType}</h3>
-                    <span className="status-badge status-pending">PENDING</span>
+                    <span className="status-pill pending">PENDING</span>
                   </div>
                   <div className="card-body">
                     <p><strong>Quantity:</strong> {donation.quantity} people</p>
@@ -169,7 +228,7 @@ const NGODashboard = () => {
                 <div key={donation._id} className={`card status-${donation.status}`}>
                   <div className="card-header">
                     <h3>{donation.foodType}</h3>
-                    <span className={`status-badge status-${donation.status}`}>
+                    <span className={`status-pill ${donation.status}`}>
                       {donation.status.toUpperCase()}
                     </span>
                   </div>
@@ -347,21 +406,46 @@ const NGODashboard = () => {
                   )}
                 </div>
 
-                {trackingModal.donation.pickupLocation?.coordinates?.lat && (
-                  <div className="map-wrapper" style={{ height: '250px', marginTop: '12px' }}>
+                {trackingMapData.loading ? (
+                  <div style={{ textAlign: 'center', padding: '20px', color: 'var(--on-surface-variant)' }}>Loading map data...</div>
+                ) : trackingMapData.markers.length > 0 ? (
+                  <div style={{ marginTop: '12px' }}>
                     <MapComponent
-                      center={{
-                        lat: trackingModal.donation.pickupLocation.coordinates.lat,
-                        lng: trackingModal.donation.pickupLocation.coordinates.lng
-                      }}
-                      markers={[{
-                        lat: trackingModal.donation.pickupLocation.coordinates.lat,
-                        lng: trackingModal.donation.pickupLocation.coordinates.lng,
-                        popup: 'Pickup Location',
-                        type: 'pickup'
-                      }]}
+                      markers={trackingMapData.markers}
+                      routeGeometry={trackingMapData.routeGeometry}
+                      routeInfo={trackingMapData.routeInfo}
+                      height="280px"
                       zoom={14}
                     />
+                  </div>
+                ) : (
+                  <div style={{ textAlign: 'center', padding: '20px', color: 'var(--on-surface-variant)', fontSize: '0.9rem' }}>
+                    Map data not yet available. Volunteer needs to share their location.
+                  </div>
+                )}
+
+                {/* Route legs breakdown */}
+                {trackingMapData.routeInfo?.legs && (
+                  <div style={{
+                    background: 'rgba(133, 83, 244, 0.04)',
+                    borderRadius: 'var(--radius-md)',
+                    border: '1px solid rgba(133, 83, 244, 0.12)',
+                    padding: '12px 16px',
+                    marginTop: '12px',
+                  }}>
+                    {trackingMapData.routeInfo.legs.map((leg, idx) => (
+                      <div key={idx} style={{
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        padding: '6px 0', borderBottom: idx < trackingMapData.routeInfo.legs.length - 1 ? '1px solid rgba(0,0,0,0.06)' : 'none',
+                      }}>
+                        <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>{leg.from} → {leg.to}</span>
+                        <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#8553f4' }}>{leg.distance} km / {leg.duration} min</span>
+                      </div>
+                    ))}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: '8px', marginTop: '6px', borderTop: '2px solid rgba(133,83,244,0.15)' }}>
+                      <span style={{ fontWeight: 800, fontSize: '0.85rem' }}>Total</span>
+                      <span style={{ fontWeight: 800, fontSize: '0.85rem', color: '#8553f4' }}>{trackingMapData.routeInfo.totalDistance} km / {trackingMapData.routeInfo.totalDuration} min</span>
+                    </div>
                   </div>
                 )}
               </div>
