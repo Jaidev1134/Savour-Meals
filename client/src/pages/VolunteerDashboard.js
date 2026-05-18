@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { volunteerAPI, routingAPI } from '../utils/api';
+import { volunteerAPI, routingAPI, geocodeAPI } from '../utils/api';
 import { useToast } from '../components/Toast';
 import MapComponent from '../components/MapComponent';
 import DeliveryProgressBar from '../components/DeliveryProgressBar';
@@ -11,15 +11,13 @@ const VolunteerDashboard = () => {
   const toast = useToast();
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [mapStates, setMapStates] = useState({});
-  const [routeInfo, setRouteInfo] = useState({});
-  const [routeLoading, setRouteLoading] = useState({});
-  
-  // Custom OTP Modal state
+
+  // Per-task state: markers, route, loading flags
+  const [taskMapData, setTaskMapData] = useState({});
+
+  // OTP Modal states
   const [otpModal, setOtpModal] = useState({ isOpen: false, taskId: null });
   const [otpValue, setOtpValue] = useState('');
-
-  // Delivery OTP Modal state (4-digit for confirming delivery to NGO)
   const [deliveryOtpModal, setDeliveryOtpModal] = useState({ isOpen: false, taskId: null });
   const [deliveryOtpValue, setDeliveryOtpValue] = useState('');
 
@@ -38,12 +36,210 @@ const VolunteerDashboard = () => {
     }
   };
 
+  /**
+   * Get or initialize map data for a task
+   */
+  const getTaskData = useCallback((taskId) => {
+    return taskMapData[taskId] || {
+      markers: [],
+      routeGeometry: null,
+      routeInfo: null,
+      routeLoading: false,
+      geocodeLoading: false,
+    };
+  }, [taskMapData]);
+
+  const updateTaskData = useCallback((taskId, updates) => {
+    setTaskMapData(prev => ({
+      ...prev,
+      [taskId]: { ...prev[taskId], ...updates }
+    }));
+  }, []);
+
+  /**
+   * Geocode an address using the server-side geocoding API
+   */
+  const geocodeAddress = async (address) => {
+    if (!address) return null;
+    try {
+      const response = await geocodeAPI.search(address);
+      if (response.data?.success && response.data?.location) {
+        return response.data.location;
+      }
+    } catch (error) {
+      console.warn('Geocode failed:', error.response?.data?.msg || error.message);
+    }
+    return null;
+  };
+
+  /**
+   * Load all markers for a task: pickup + delivery + volunteer (if available)
+   */
+  const loadAllMarkers = async (task) => {
+    const donation = task.donationId;
+    const markers = [];
+
+    updateTaskData(task._id, { geocodeLoading: true });
+
+    // 1. Pickup location from donation coordinates (auto-geocoded on server)
+    const pickupCoords = donation?.pickupLocation?.coordinates;
+    if (pickupCoords?.lat && pickupCoords?.lng) {
+      markers.push({
+        lat: pickupCoords.lat,
+        lng: pickupCoords.lng,
+        popup: 'Pickup Location',
+        details: donation.pickupLocation.address,
+        type: 'pickup'
+      });
+    } else if (donation?.pickupLocation?.address) {
+      // Fallback: geocode on client
+      const geo = await geocodeAddress(donation.pickupLocation.address);
+      if (geo) {
+        markers.push({
+          lat: geo.lat,
+          lng: geo.lng,
+          popup: 'Pickup Location',
+          details: donation.pickupLocation.address,
+          type: 'pickup'
+        });
+      }
+    }
+
+    // 2. Delivery location from delivery address
+    if (task.deliveryAddress) {
+      const deliveryGeo = await geocodeAddress(task.deliveryAddress);
+      if (deliveryGeo) {
+        markers.push({
+          lat: deliveryGeo.lat,
+          lng: deliveryGeo.lng,
+          popup: 'Delivery Location',
+          details: task.deliveryAddress,
+          type: 'delivery'
+        });
+      }
+    }
+
+    updateTaskData(task._id, { markers, geocodeLoading: false });
+    return markers;
+  };
+
+  /**
+   * Share volunteer's current GPS location
+   */
+  const handleShareLocation = (task) => {
+    if (!navigator.geolocation) {
+      toast.warning('Geolocation is not supported by your browser');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const { latitude, longitude } = position.coords;
+        const currentLocation = { lat: latitude, lng: longitude };
+
+        // Update markers — keep existing non-volunteer markers, add/update volunteer
+        setTaskMapData(prev => {
+          const existing = prev[task._id] || {};
+          const otherMarkers = (existing.markers || []).filter(m => m.type !== 'volunteer');
+          return {
+            ...prev,
+            [task._id]: {
+              ...existing,
+              markers: [
+                ...otherMarkers,
+                { lat: latitude, lng: longitude, popup: 'My Location', details: 'Your current position', type: 'volunteer' }
+              ]
+            }
+          };
+        });
+
+        // Also update status on server
+        try {
+          await volunteerAPI.updateTaskStatus(task._id, task.status, currentLocation);
+          toast.success('Location shared successfully!');
+        } catch (error) {
+          // Location was still shown on map even if status update fails
+          console.warn('Status update with location failed:', error);
+        }
+      },
+      (error) => {
+        toast.error('Unable to retrieve your location. Please enable GPS.');
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  /**
+   * Get full route: Volunteer → Pickup → Delivery
+   */
+  const handleGetRoute = async (task) => {
+    const donationId = task.donationId?._id || task.donationId;
+    const currentData = getTaskData(task._id);
+
+    // Ensure volunteer location is shared first
+    const hasVolunteer = currentData.markers?.some(m => m.type === 'volunteer');
+    if (!hasVolunteer) {
+      toast.warning('Please share your location first to compute the route.');
+      return;
+    }
+
+    updateTaskData(task._id, { routeLoading: true });
+
+    try {
+      const response = await routingAPI.getRoute(donationId);
+      const { route, markers: serverMarkers } = response.data;
+
+      // Build updated markers from server response (most accurate)
+      const newMarkers = [];
+      if (serverMarkers?.volunteer) {
+        newMarkers.push({
+          lat: serverMarkers.volunteer.lat,
+          lng: serverMarkers.volunteer.lng,
+          popup: 'My Location',
+          details: 'Your current position',
+          type: 'volunteer'
+        });
+      }
+      if (serverMarkers?.pickup) {
+        newMarkers.push({
+          lat: serverMarkers.pickup.lat,
+          lng: serverMarkers.pickup.lng,
+          popup: 'Pickup Location',
+          details: task.donationId?.pickupLocation?.address || 'Donor pickup point',
+          type: 'pickup'
+        });
+      }
+      if (serverMarkers?.delivery) {
+        newMarkers.push({
+          lat: serverMarkers.delivery.lat,
+          lng: serverMarkers.delivery.lng,
+          popup: 'Delivery Location',
+          details: task.deliveryAddress || 'NGO delivery point',
+          type: 'delivery'
+        });
+      }
+
+      updateTaskData(task._id, {
+        markers: newMarkers.length > 0 ? newMarkers : currentData.markers,
+        routeGeometry: route.geometry,
+        routeInfo: route,
+        routeLoading: false,
+      });
+
+      toast.success('Route loaded successfully!');
+    } catch (error) {
+      const msg = error.response?.data?.msg || 'Unable to compute route.';
+      toast.error(msg);
+      updateTaskData(task._id, { routeLoading: false });
+    }
+  };
+
+  // Status update handlers
   const updateStatus = async (taskId, status, currentLocation = null, otp = null) => {
     if (status === 'picked' && !otp) {
       setOtpModal({ isOpen: true, taskId });
-      return; 
+      return;
     }
-
     if (status === 'delivered' && !otp) {
       setDeliveryOtpModal({ isOpen: true, taskId });
       return;
@@ -78,83 +274,6 @@ const VolunteerDashboard = () => {
     }
   };
 
-  const handleShareLocation = (task) => {
-    if (!navigator.geolocation) {
-      toast.warning('Geolocation is not supported by your browser');
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        const { latitude, longitude } = position.coords;
-        const currentLocation = { lat: latitude, lng: longitude };
-
-        setMapStates(prev => ({
-          ...prev,
-          [task._id]: {
-            ...prev[task._id],
-            center: currentLocation,
-            markers: [
-              ...(prev[task._id]?.markers || []).filter(m => m.type !== 'volunteer'),
-              { lat: latitude, lng: longitude, popup: 'My Location', type: 'volunteer' }
-            ]
-          }
-        }));
-
-        await updateStatus(task._id, task.status, currentLocation);
-        toast.success('Location shared successfully!');
-      },
-      (error) => {
-        toast.error('Unable to retrieve your location');
-      }
-    );
-  };
-
-  const handleGetRoute = async (task) => {
-    const donationId = task.donationId?._id || task.donationId;
-    setRouteLoading(prev => ({ ...prev, [task._id]: true }));
-    try {
-      const response = await routingAPI.getRoute(donationId);
-      setRouteInfo(prev => ({ ...prev, [task._id]: response.data.route }));
-    } catch (error) {
-      const msg = error.response?.data?.msg || 'Unable to compute route. Share your location first.';
-      toast.error(msg);
-    } finally {
-      setRouteLoading(prev => ({ ...prev, [task._id]: false }));
-    }
-  };
-
-  const handleSearchLocation = async (taskId, address) => {
-    try {
-      if (!address) return;
-
-      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`);
-      const data = await response.json();
-
-      if (data && data.length > 0) {
-        const { lat, lon } = data[0];
-        const location = { lat: parseFloat(lat), lng: parseFloat(lon) };
-
-        setMapStates(prev => ({
-          ...prev,
-          [taskId]: {
-            ...prev[taskId],
-            center: location,
-            markers: [
-              ...(prev[taskId]?.markers || []).filter(m => m.type === 'volunteer'),
-              { lat: location.lat, lng: location.lng, popup: address, type: 'destination' }
-            ]
-          }
-        }));
-      } else {
-        toast.warning('Location not found');
-      }
-    } catch (error) {
-      console.error('Error searching location:', error);
-      toast.error('Error searching location');
-    }
-  };
-
   return (
     <div className="dashboard">
       <header className="dashboard-header">
@@ -179,13 +298,13 @@ const VolunteerDashboard = () => {
             <div className="cards-grid">
               {tasks.map((task) => {
                 const donation = task.donationId;
-                const mapState = mapStates[task._id] || {};
+                const data = getTaskData(task._id);
 
                 return (
                   <div key={task._id} className="card volunteer-card">
                     <div className="card-header">
                       <h3>{donation?.foodType}</h3>
-                      <span className={`status-badge status-${task.status}`}>
+                      <span className={`status-pill ${task.status}`}>
                         {task.status.replace('_', ' ').toUpperCase()}
                       </span>
                     </div>
@@ -196,65 +315,107 @@ const VolunteerDashboard = () => {
                     <div className="card-body">
                       {/* Map Section */}
                       <div className="map-section">
-                        {mapState.markers && (
-                          <div className="map-wrapper" style={{ height: '300px', marginBottom: '15px' }}>
-                            <MapComponent
-                              center={mapState.center}
-                              markers={mapState.markers}
-                              zoom={15}
-                            />
-                          </div>
+                        {data.markers && data.markers.length > 0 && (
+                          <MapComponent
+                            markers={data.markers}
+                            routeGeometry={data.routeGeometry}
+                            routeInfo={data.routeInfo}
+                            height="320px"
+                            zoom={14}
+                          />
                         )}
-                        <div className="map-controls" style={{ display: 'flex', gap: '10px', marginBottom: '15px', flexWrap: 'wrap' }}>
+
+                        {/* Map Controls */}
+                        <div style={{ display: 'flex', gap: '10px', marginBottom: '12px', flexWrap: 'wrap' }}>
                           <button
-                            onClick={() => handleSearchLocation(task._id, task.deliveryAddress)}
+                            onClick={() => loadAllMarkers(task)}
                             className="btn-secondary"
-                            style={{ flex: 1 }}
+                            style={{ flex: 1, minWidth: '120px' }}
+                            disabled={data.geocodeLoading}
                           >
-                            Show Delivery Location
+                            {data.geocodeLoading ? (
+                              <span>Locating...</span>
+                            ) : (
+                              <span>📍 Show Locations</span>
+                            )}
                           </button>
                           <button
                             onClick={() => handleShareLocation(task)}
                             className="btn-secondary"
-                            style={{ flex: 1, background: '#4299E1', color: 'white' }}
+                            style={{ flex: 1, minWidth: '120px', background: '#3b82f6', color: 'white' }}
                           >
-                            Share My Location
-                          </button>
-                        </div>
-                        <small style={{ display: 'block', textAlign: 'center', color: '#718096', marginBottom: '15px' }}>
-                          *Click "Show Delivery Location" to view the destination on the map above.
-                        </small>
-
-                        {/* Route Info */}
-                        <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
-                          <button
-                            onClick={() => handleGetRoute(task)}
-                            className="btn-secondary"
-                            style={{ flex: 1, background: '#059669', color: 'white' }}
-                            disabled={routeLoading[task._id]}
-                          >
-                            {routeLoading[task._id] ? 'Computing...' : 'Get Route & ETA'}
+                            📡 Share My Location
                           </button>
                         </div>
 
-                        {routeInfo[task._id] && (
-                          <div style={{ 
-                            display: 'flex', gap: '16px', padding: '14px 18px', 
-                            background: 'rgba(5, 150, 105, 0.08)', borderRadius: 'var(--radius-md)',
-                            border: '1px solid rgba(5, 150, 105, 0.15)', marginBottom: '15px'
+                        <button
+                          onClick={() => handleGetRoute(task)}
+                          className="btn-secondary"
+                          style={{
+                            width: '100%',
+                            marginBottom: '12px',
+                            background: 'linear-gradient(135deg, #8553f4, #00d2d3)',
+                            color: 'white',
+                            fontWeight: 700,
+                            border: 'none',
+                            padding: '12px',
+                            borderRadius: 'var(--radius-sm)',
+                          }}
+                          disabled={data.routeLoading}
+                        >
+                          {data.routeLoading ? '⏳ Computing Route...' : '🗺️ Get Route & ETA'}
+                        </button>
+
+                        {/* Route legs breakdown */}
+                        {data.routeInfo?.legs && (
+                          <div style={{
+                            background: 'rgba(133, 83, 244, 0.04)',
+                            borderRadius: 'var(--radius-md)',
+                            border: '1px solid rgba(133, 83, 244, 0.12)',
+                            padding: '14px 18px',
+                            marginBottom: '15px',
                           }}>
-                            <div style={{ flex: 1, textAlign: 'center' }}>
-                              <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#059669' }}>
-                                {routeInfo[task._id].distance} km
+                            {data.routeInfo.legs.map((leg, idx) => (
+                              <div key={idx} style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                padding: '8px 0',
+                                borderBottom: idx < data.routeInfo.legs.length - 1 ? '1px solid rgba(0,0,0,0.06)' : 'none',
+                              }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                  <span style={{
+                                    width: '22px', height: '22px', borderRadius: '50%',
+                                    background: idx === 0 ? '#3b82f6' : '#22c55e',
+                                    color: 'white', display: 'flex', alignItems: 'center',
+                                    justifyContent: 'center', fontSize: '0.65rem', fontWeight: 800,
+                                  }}>{idx + 1}</span>
+                                  <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                                    {leg.from} → {leg.to}
+                                  </span>
+                                </div>
+                                <div style={{ display: 'flex', gap: '12px', fontSize: '0.8rem', fontWeight: 700 }}>
+                                  <span style={{ color: '#8553f4' }}>{leg.distance} km</span>
+                                  <span style={{ color: '#00d2d3' }}>{leg.duration} min</span>
+                                </div>
                               </div>
-                              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--on-surface-variant)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Distance</div>
-                            </div>
-                            <div style={{ width: '1px', background: 'rgba(5, 150, 105, 0.2)' }} />
-                            <div style={{ flex: 1, textAlign: 'center' }}>
-                              <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#059669' }}>
-                                {routeInfo[task._id].duration} min
+                            ))}
+
+                            {/* Total */}
+                            <div style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              paddingTop: '10px',
+                              marginTop: '8px',
+                              borderTop: '2px solid rgba(133, 83, 244, 0.15)',
+                            }}>
+                              <span style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--on-surface)' }}>
+                                Total
+                              </span>
+                              <div style={{ display: 'flex', gap: '12px', fontSize: '0.85rem', fontWeight: 800 }}>
+                                <span style={{ color: '#8553f4' }}>{data.routeInfo.totalDistance} km</span>
+                                <span style={{ color: '#00d2d3' }}>{data.routeInfo.totalDuration} min</span>
                               </div>
-                              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--on-surface-variant)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Est. Time</div>
                             </div>
                           </div>
                         )}

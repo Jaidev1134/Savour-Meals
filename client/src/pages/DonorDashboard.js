@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { foodAPI } from '../utils/api';
+import { foodAPI, geocodeAPI } from '../utils/api';
 import { useToast } from '../components/Toast';
 import MapComponent from '../components/MapComponent';
 import DeliveryProgressBar from '../components/DeliveryProgressBar';
@@ -24,6 +24,11 @@ const DonorDashboard = () => {
     },
     notes: '',
   });
+
+  // Address preview geocoding state
+  const [addressPreview, setAddressPreview] = useState(null);
+  const [geocodeLoading, setGeocodeLoading] = useState(false);
+  const geocodeTimer = useRef(null);
 
   useEffect(() => {
     fetchDonations();
@@ -67,6 +72,47 @@ const DonorDashboard = () => {
       toast.success('Donation created successfully!');
     } catch (error) {
       toast.error(error.response?.data?.msg || 'Error creating donation');
+    }
+  };
+
+  // Debounced address geocoding for form preview
+  const handleAddressChange = (newAddress) => {
+    setFormData({
+      ...formData,
+      pickupLocation: { ...formData.pickupLocation, address: newAddress },
+    });
+
+    // Clear previous timer
+    if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
+
+    // Debounce: wait 800ms after user stops typing
+    if (newAddress.trim().length >= 5) {
+      geocodeTimer.current = setTimeout(async () => {
+        setGeocodeLoading(true);
+        try {
+          const response = await geocodeAPI.search(newAddress);
+          if (response.data?.success && response.data?.location) {
+            const { lat, lng } = response.data.location;
+            setAddressPreview({ lat, lng });
+            // Also update form data coordinates
+            setFormData(prev => ({
+              ...prev,
+              pickupLocation: {
+                ...prev.pickupLocation,
+                coordinates: { lat, lng },
+              },
+            }));
+          } else {
+            setAddressPreview(null);
+          }
+        } catch {
+          setAddressPreview(null);
+        } finally {
+          setGeocodeLoading(false);
+        }
+      }, 800);
+    } else {
+      setAddressPreview(null);
     }
   };
 
@@ -157,17 +203,30 @@ const DonorDashboard = () => {
                 <input
                   type="text"
                   value={formData.pickupLocation.address}
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      pickupLocation: { ...formData.pickupLocation, address: e.target.value },
-                    })
-                  }
+                  onChange={(e) => handleAddressChange(e.target.value)}
                   placeholder="Enter full address for pickup"
                   required
                   className="modern-input"
                 />
+                {geocodeLoading && (
+                  <small className="hint-text" style={{ color: 'var(--primary)' }}>📍 Resolving address...</small>
+                )}
+                {addressPreview && !geocodeLoading && (
+                  <small className="hint-text" style={{ color: '#22c55e' }}>✓ Location found</small>
+                )}
               </div>
+
+              {/* Address preview map */}
+              {addressPreview && (
+                <div className="full-width" style={{ marginBottom: '1rem' }}>
+                  <MapComponent
+                    center={addressPreview}
+                    markers={[{ lat: addressPreview.lat, lng: addressPreview.lng, popup: 'Pickup Location', type: 'pickup' }]}
+                    height="200px"
+                    zoom={15}
+                  />
+                </div>
+              )}
 
               <div className="form-group full-width">
                 <label>Notes / Instructions (Optional)</label>

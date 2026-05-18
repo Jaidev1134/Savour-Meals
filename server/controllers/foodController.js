@@ -4,7 +4,8 @@ const User = require('../models/User');
 const Delivery = require('../models/Delivery');
 const { sendBatchNotifications, sendNotification } = require('../utils/notifications');
 const { sendNotificationEmail } = require('../utils/email');
-const { getRoute: getOSRMRoute } = require('../utils/routing');
+const { getRoute: getOSRMRoute, getMultiLegRoute } = require('../utils/routing');
+const { geocode } = require('../utils/geocoding');
 
 // @desc    Create a food donation request
 // @route   POST /api/food/create
@@ -25,6 +26,20 @@ const createDonation = async (req, res) => {
 
       if (!isLatValid || !isLngValid) {
         delete pickupLocationData.coordinates;
+      }
+    }
+
+    // Auto-geocode: if no valid coordinates, resolve from address
+    if (!pickupLocationData.coordinates && pickupLocationData.address) {
+      try {
+        const geoResult = await geocode(pickupLocationData.address);
+        if (geoResult) {
+          pickupLocationData.coordinates = { lat: geoResult.lat, lng: geoResult.lng };
+          console.log(`[Donation] Auto-geocoded pickup: ${geoResult.lat}, ${geoResult.lng} (${geoResult.source})`);
+        }
+      } catch (geoErr) {
+        console.warn('[Donation] Geocoding failed for pickup address:', geoErr.message);
+        // Non-fatal: donation still created without coordinates
       }
     }
 
@@ -326,7 +341,7 @@ const updateStatus = async (req, res) => {
   }
 };
 
-// @desc    Get OSRM route for a donation delivery
+// @desc    Get OSRM route for a donation delivery (multi-leg: Volunteer → Pickup → Delivery)
 // @route   GET /api/food/route/:id
 // @access  Private (Volunteer/NGO)
 const getRouteInfo = async (req, res) => {
@@ -340,16 +355,27 @@ const getRouteInfo = async (req, res) => {
       });
     }
 
-    // Find associated delivery for volunteer location
+    // Find associated delivery for volunteer location and delivery address
     const delivery = await Delivery.findOne({ donationId: donation._id });
 
-    const pickupCoords = donation.pickupLocation?.coordinates;
+    let pickupCoords = donation.pickupLocation?.coordinates;
     const volunteerCoords = delivery?.currentLocation;
+
+    // Auto-geocode pickup if coordinates are missing
+    if ((!pickupCoords?.lat || !pickupCoords?.lng) && donation.pickupLocation?.address) {
+      const geoResult = await geocode(donation.pickupLocation.address);
+      if (geoResult) {
+        pickupCoords = { lat: geoResult.lat, lng: geoResult.lng };
+        // Persist for future requests
+        donation.pickupLocation.coordinates = pickupCoords;
+        await donation.save();
+      }
+    }
 
     if (!pickupCoords?.lat || !pickupCoords?.lng) {
       return res.status(400).json({
         success: false,
-        msg: 'Pickup location coordinates not available'
+        msg: 'Pickup location coordinates not available. Could not geocode the address.'
       });
     }
 
@@ -360,12 +386,49 @@ const getRouteInfo = async (req, res) => {
       });
     }
 
-    const route = await getOSRMRoute(
-      volunteerCoords.lat,
-      volunteerCoords.lng,
-      pickupCoords.lat,
-      pickupCoords.lng
-    );
+    // Try to geocode the delivery address for the 3rd waypoint
+    let deliveryCoords = null;
+    const deliveryAddress = delivery?.deliveryAddress || donation.deliveryAddress;
+    if (deliveryAddress) {
+      const deliveryGeo = await geocode(deliveryAddress);
+      if (deliveryGeo) {
+        deliveryCoords = { lat: deliveryGeo.lat, lng: deliveryGeo.lng };
+      }
+    }
+
+    // Build waypoints array
+    const waypoints = [
+      { lat: volunteerCoords.lat, lng: volunteerCoords.lng },
+      { lat: pickupCoords.lat, lng: pickupCoords.lng },
+    ];
+    if (deliveryCoords) {
+      waypoints.push({ lat: deliveryCoords.lat, lng: deliveryCoords.lng });
+    }
+
+    // Use multi-leg route if 3 points, otherwise 2-point route
+    let route;
+    if (waypoints.length >= 3) {
+      route = await getMultiLegRoute(waypoints);
+    } else {
+      const simpleRoute = await getOSRMRoute(
+        volunteerCoords.lat, volunteerCoords.lng,
+        pickupCoords.lat, pickupCoords.lng
+      );
+      if (simpleRoute) {
+        route = {
+          totalDistance: simpleRoute.distance,
+          totalDuration: simpleRoute.duration,
+          legs: [{
+            legIndex: 0,
+            from: 'Volunteer',
+            to: 'Pickup',
+            distance: simpleRoute.distance,
+            duration: simpleRoute.duration,
+          }],
+          geometry: simpleRoute.geometry,
+        };
+      }
+    }
 
     if (!route) {
       return res.status(503).json({
@@ -374,9 +437,15 @@ const getRouteInfo = async (req, res) => {
       });
     }
 
+    // Include marker coordinates in response so frontend can display them
     res.json({
       success: true,
-      route
+      route,
+      markers: {
+        volunteer: volunteerCoords,
+        pickup: pickupCoords,
+        delivery: deliveryCoords,  // may be null
+      }
     });
   } catch (error) {
     res.status(500).json({
