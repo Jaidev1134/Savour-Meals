@@ -86,5 +86,10 @@ export const routingAPI = {
   getRoute: (donationId) => api.get(`/food/route/${donationId}`),
 };
 
+// Geocoding API (server-side Nominatim + Photon)
+export const geocodeAPI = {
+  search: (address) => api.get('/geocode', { params: { address } }),
+};
+
 export default api;
 
