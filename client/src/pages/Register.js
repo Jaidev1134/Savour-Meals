@@ -128,7 +128,6 @@ const Register = () => {
               <option value="donor">Food Donor</option>
               <option value="ngo">NGO</option>
               <option value="volunteer">Volunteer</option>
-              <option value="admin">Admin</option>
             </select>
           </div>
           {formData.role === 'ngo' && (

@@ -8,6 +8,14 @@ const register = async (req, res) => {
   try {
     const { name, email, password, role, phone, location, organizationName } = req.body;
 
+    // Block admin registration via public API
+    if (role === 'admin') {
+      return res.status(403).json({
+        success: false,
+        msg: 'Admin registration is not allowed'
+      });
+    }
+
     // Check if user already exists
     const userExists = await User.findOne({ email });
     if (userExists) {
