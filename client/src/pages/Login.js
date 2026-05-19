@@ -43,33 +43,10 @@ const Login = () => {
     <div className="auth-container">
       <div className="auth-visual-section">
         <div className="visual-content">
-          <div className="sdg-badge">Surplus Food Sharing</div>
-          <h1>Coalition of Partners<br/>To Prevent Food Waste</h1>
-          <p>Understanding the scale of India's food crisis — and how Savour Meals helps bridge the gap.</p>
-
-          {/* Infographic Circles */}
-          <div className="info-circles-grid">
-            <div className="info-circle green">
-              <span className="circle-icon">🍽️</span>
-              <p>With 10.04% of world's total food production, India is the second largest food producer after China.</p>
-            </div>
-            <div className="info-circle orange">
-              <span className="circle-icon">👨‍👩‍👧‍👦</span>
-              <p>India has 196 million under-nourished people, second highest in the world.</p>
-            </div>
-            <div className="info-circle gold">
-              <span className="circle-icon">📊</span>
-              <p>25% of hungry people worldwide live in India.</p>
-            </div>
-            <div className="info-circle blue">
-              <span className="circle-icon">📉</span>
-              <p>With a score of 31.1 in Global Hunger Index, India suffers from a serious level of hunger.</p>
-            </div>
-            <div className="info-circle red">
-              <span className="circle-icon">🤝</span>
-              <p>Stakeholder action is the only solution to tackle the ironical problem of food wastage and hunger.</p>
-            </div>
-          </div>
+          <div className="sdg-badge">SDG Goal 2</div>
+          <h1>End Hunger<br/>Share Hope</h1>
+          <p>Join our thriving community dedicated to redistributing excess food to those who need it most. Together, we can achieve Zero Hunger.</p>
+          <img src="/sdg_hero.png" alt="Community sharing food - SDG 2 Zero Hunger" className="sdg-hero-img" />
         </div>
       </div>
       <div className="auth-form-section">
