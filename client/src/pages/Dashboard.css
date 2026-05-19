@@ -105,6 +105,37 @@ body {
   box-shadow: 0 8px 15px rgba(239, 68, 68, 0.15);
 }
 
+/* Header Actions Group */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.btn-home {
+  background: white;
+  color: var(--primary);
+  border: 1px solid rgba(133, 83, 244, 0.15);
+  padding: 10px 20px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: var(--transition-bouncy);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: var(--shadow-sm);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+.btn-home:hover {
+  background: rgba(133, 83, 244, 0.06);
+  border-color: var(--primary-light);
+  transform: translateY(-2px) scale(1.05);
+  box-shadow: 0 8px 15px rgba(133, 83, 244, 0.15);
+}
+
 /* Content Area */
 .dashboard-content {
   max-width: 1300px;
