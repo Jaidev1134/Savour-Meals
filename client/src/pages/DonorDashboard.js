@@ -350,7 +350,7 @@ const DonorDashboard = () => {
                         </div>
                       )}
 
-                      {donation.pickupOtp && ['accepted', 'picked'].includes(donation.status) && (
+                      {donation.pickupOtp && ['pending', 'accepted', 'picked'].includes(donation.status) && (
                         <div className="otp-box" style={{ marginTop: '15px' }}>
                           <span className="otp-label">PICKUP OTP</span>
                           <span className="otp-value">{donation.pickupOtp}</span>
